@@ -1,0 +1,82 @@
+@import "tailwindcss";
+@import "leaflet/dist/leaflet.css";
+
+:root {
+  --cream: #fff8f0;
+  --ink: #3b0d0c;
+  --muted: #7a3b2e;
+  --orange: #e85d04;
+  --orange-deep: #dc2f02;
+  --red: #9d0208;
+  --gold: #e9c46a;
+  --gold-deep: #c9a227;
+  --card: #fffdf8;
+  --line: #f4d6b0;
+}
+
+@theme inline {
+  --color-cream: var(--cream);
+  --color-ink: var(--ink);
+  --color-muted: var(--muted);
+  --color-orange: var(--orange);
+  --color-orange-deep: var(--orange-deep);
+  --color-red: var(--red);
+  --color-gold: var(--gold);
+  --color-gold-deep: var(--gold-deep);
+  --color-card: var(--card);
+  --color-line: var(--line);
+  --font-sans: var(--font-outfit);
+  --font-display: var(--font-fraunces);
+}
+
+html,
+body {
+  background: var(--cream);
+  color: var(--ink);
+  min-height: 100%;
+}
+
+body {
+  font-family: var(--font-outfit), system-ui, sans-serif;
+}
+
+h1,
+h2,
+.font-display {
+  font-family: var(--font-fraunces), Georgia, serif;
+}
+
+.leaflet-container {
+  width: 100%;
+  height: 100%;
+  background: #f6e7d4;
+  font-family: inherit;
+  z-index: 0;
+}
+
+.venue-pin {
+  background: transparent;
+  border: none;
+}
+
+.venue-pin-inner {
+  width: 22px;
+  height: 22px;
+  border-radius: 50% 50% 50% 0;
+  transform: rotate(-45deg);
+  background: linear-gradient(135deg, #e85d04, #9d0208);
+  border: 2px solid #e9c46a;
+  box-shadow: 0 2px 6px rgba(61, 13, 12, 0.35);
+}
+
+input,
+select,
+textarea,
+button {
+  font: inherit;
+}
+
+:focus-visible {
+  outline: 2px solid var(--orange);
+  outline-offset: 2px;
+}

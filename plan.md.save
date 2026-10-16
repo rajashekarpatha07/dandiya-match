@@ -1,0 +1,614 @@
+# Dandiya Partner Finder: Full Build Spec
+
+> Hand this whole document to the coding agent. Build in the phase order in Section 11 and do not skip the acceptance checks.
+
+## 1. Product summary
+
+A web app where people in one city (Hyderabad) find a dandiya/garba partner for a specific venue on a specific night.
+
+**Core flow**
+1. User signs in with Google (Supabase Auth).
+2. First-time users complete onboarding (profile + private contact details).
+3. A map shows dandiya venues as pins. User taps a venue and picks an event date.
+4. User posts a listing: "I'm going to Venue X on date Y and want a partner".
+5. User browses other open listings for the same event and sends a request.
+6. The receiver accepts or declines.
+7. Only after acceptance do both users see each other's contact details.
+8. A dashboard shows Sent, Received and Matched requests.
+
+**Non-negotiable rules**
+- Contact details are never visible before a mutual accepted match. This is enforced in the database (RLS), not only in the UI.
+- 18+ only.
+- All state changes on requests go through Postgres RPC functions, never direct table writes from the client.
+
+## 2. Tech stack
+
+| Layer | Choice |
+|---|---|
+| Framework | Next.js (App Router) + TypeScript |
+| Styling | Tailwind CSS (mobile-first; most users are on phones) |
+| Map | Leaflet + react-leaflet + free OpenStreetMap tiles, used **only to show venue location pins** (no routing, search or other map features) |
+| Data fetching | TanStack Query (client components) |
+| Backend | Supabase (Auth with Google, Postgres, RLS, RPC, Realtime) |
+| Supabase client | `@supabase/supabase-js` + `@supabase/ssr` (cookie-based sessions) |
+| Validation | zod + react-hook-form |
+
+Notes for the agent:
+- Leaflet needs `window`, so load the map component with `next/dynamic` and `ssr: false`, inside a client component.
+- Import `leaflet/dist/leaflet.css`, and fix the default marker icon paths (a known Leaflet and bundler issue) or use a custom pin icon.
+- Deployment is handled by the owner. Do not add deployment config.
+
+## 3. Environment variables
+
+```
+NEXT_PUBLIC_SUPABASE_URL=
+NEXT_PUBLIC_SUPABASE_ANON_KEY=
+```
+
+Never put the service role key in the frontend.
+
+## 4. Supabase setup (manual steps for the owner)
+
+1. Create a Supabase project.
+2. Google Cloud Console: create OAuth credentials (Web application). Add the Supabase callback URL (shown in Supabase under Auth > Providers > Google) as an authorized redirect URI.
+3. Supabase: Auth > Providers > Google, paste the Client ID and Secret, enable it.
+4. Supabase: Auth > URL Configuration, add `http://localhost:3000/auth/callback` to Redirect URLs for local development.
+5. Run the migration in Section 5 in the SQL editor (or as a migration file).
+6. The owner adds venues and `venue_events` rows manually (Supabase table editor or SQL). The agent should not seed any venue data.
+
+## 5. Database migration (run in order)
+
+```sql
+-- =========================================================
+-- TABLES
+-- =========================================================
+
+create table profiles (
+  id uuid primary key references auth.users(id) on delete cascade,
+  display_name text not null default 'Dandiya Fan',
+  avatar_url text,
+  gender text check (gender in ('male','female','other')),
+  age int check (age >= 18 and age <= 80),
+  experience text check (experience in ('beginner','intermediate','pro')),
+  bio text check (char_length(bio) <= 300),
+  onboarded boolean not null default false,
+  created_at timestamptz not null default now()
+);
+
+-- Private. Readable by others only after an accepted match.
+create table profile_contacts (
+  user_id uuid primary key references profiles(id) on delete cascade,
+  phone text,
+  instagram text,
+  updated_at timestamptz not null default now()
+);
+
+create table venues (
+  id uuid primary key default gen_random_uuid(),
+  name text not null,
+  description text,
+  address text,
+  area text,
+  lat double precision not null,
+  lng double precision not null,
+  entry_fee numeric,
+  image_url text,
+  is_active boolean not null default true,
+  created_at timestamptz not null default now()
+);
+
+create table venue_events (
+  id uuid primary key default gen_random_uuid(),
+  venue_id uuid not null references venues(id) on delete cascade,
+  event_date date not null,
+  start_time time,
+  end_time time,
+  unique (venue_id, event_date)
+);
+
+create table partner_listings (
+  id uuid primary key default gen_random_uuid(),
+  user_id uuid not null references profiles(id) on delete cascade,
+  event_id uuid not null references venue_events(id) on delete cascade,
+  note text check (char_length(note) <= 200),
+  preferred_gender text not null default 'any'
+    check (preferred_gender in ('any','male','female')),
+  status text not null default 'open'
+    check (status in ('open','matched','closed')),
+  created_at timestamptz not null default now(),
+  unique (user_id, event_id)
+);
+
+create table match_requests (
+  id uuid primary key default gen_random_uuid(),
+  event_id uuid not null references venue_events(id) on delete cascade,
+  sender_id uuid not null references profiles(id) on delete cascade,
+  receiver_id uuid not null references profiles(id) on delete cascade,
+  message text check (char_length(message) <= 200),
+  status text not null default 'pending'
+    check (status in ('pending','accepted','rejected','cancelled')),
+  created_at timestamptz not null default now(),
+  responded_at timestamptz,
+  check (sender_id <> receiver_id),
+  unique (event_id, sender_id, receiver_id)
+);
+
+create table blocks (
+  blocker_id uuid not null references profiles(id) on delete cascade,
+  blocked_id uuid not null references profiles(id) on delete cascade,
+  created_at timestamptz not null default now(),
+  primary key (blocker_id, blocked_id),
+  check (blocker_id <> blocked_id)
+);
+
+create table reports (
+  id uuid primary key default gen_random_uuid(),
+  reporter_id uuid not null references profiles(id) on delete cascade,
+  reported_id uuid not null references profiles(id) on delete cascade,
+  event_id uuid references venue_events(id) on delete set null,
+  reason text not null check (char_length(reason) <= 500),
+  created_at timestamptz not null default now()
+);
+
+-- Indexes
+create index on match_requests (sender_id, status);
+create index on match_requests (receiver_id, status);
+create index on match_requests (event_id, status);
+create index on partner_listings (event_id, status);
+create index on venue_events (event_date);
+
+-- =========================================================
+-- HELPER: today's date in India (DB runs in UTC)
+-- =========================================================
+create or replace function ist_today() returns date
+language sql stable as $$
+  select (now() at time zone 'Asia/Kolkata')::date
+$$;
+
+-- =========================================================
+-- AUTO-CREATE PROFILE ON SIGNUP
+-- =========================================================
+create or replace function handle_new_user() returns trigger
+language plpgsql security definer set search_path = public as $$
+begin
+  insert into profiles (id, display_name, avatar_url)
+  values (
+    new.id,
+    coalesce(new.raw_user_meta_data->>'full_name', 'Dandiya Fan'),
+    new.raw_user_meta_data->>'avatar_url'
+  );
+  return new;
+end; $$;
+
+create trigger on_auth_user_created
+  after insert on auth.users
+  for each row execute function handle_new_user();
+
+-- =========================================================
+-- ROW LEVEL SECURITY
+-- =========================================================
+alter table profiles         enable row level security;
+alter table profile_contacts enable row level security;
+alter table venues           enable row level security;
+alter table venue_events     enable row level security;
+alter table partner_listings enable row level security;
+alter table match_requests   enable row level security;
+alter table blocks           enable row level security;
+alter table reports          enable row level security;
+
+-- profiles: any signed-in user can read; only owner can update
+create policy "profiles read" on profiles
+  for select to authenticated using (true);
+create policy "profiles update own" on profiles
+  for update to authenticated using (auth.uid() = id) with check (auth.uid() = id);
+
+-- profile_contacts: owner full access; others only after accepted match
+create policy "contacts own" on profile_contacts
+  for all to authenticated
+  using (auth.uid() = user_id) with check (auth.uid() = user_id);
+
+create policy "contacts matched read" on profile_contacts
+  for select to authenticated using (
+    exists (
+      select 1 from match_requests m
+      where m.status = 'accepted'
+        and ((m.sender_id = auth.uid() and m.receiver_id = profile_contacts.user_id)
+          or (m.receiver_id = auth.uid() and m.sender_id = profile_contacts.user_id))
+    )
+  );
+
+-- venues + events: read-only for signed-in users (writes via SQL editor/admin only)
+create policy "venues read" on venues
+  for select to authenticated using (is_active);
+create policy "events read" on venue_events
+  for select to authenticated using (true);
+
+-- partner_listings: see open listings (excluding blocked either way) and your own
+create policy "listings read" on partner_listings
+  for select to authenticated using (
+    user_id = auth.uid()
+    or (
+      status = 'open'
+      and not exists (
+        select 1 from blocks b
+        where (b.blocker_id = auth.uid() and b.blocked_id = partner_listings.user_id)
+           or (b.blocker_id = partner_listings.user_id and b.blocked_id = auth.uid())
+      )
+    )
+  );
+create policy "listings insert own" on partner_listings
+  for insert to authenticated with check (user_id = auth.uid());
+create policy "listings update own" on partner_listings
+  for update to authenticated using (user_id = auth.uid()) with check (user_id = auth.uid());
+create policy "listings delete own" on partner_listings
+  for delete to authenticated using (user_id = auth.uid());
+
+-- match_requests: READ ONLY from client. All writes go through RPCs below.
+create policy "requests read own" on match_requests
+  for select to authenticated using (auth.uid() in (sender_id, receiver_id));
+
+-- blocks
+create policy "blocks own" on blocks
+  for all to authenticated
+  using (blocker_id = auth.uid()) with check (blocker_id = auth.uid());
+
+-- reports: insert only
+create policy "reports insert" on reports
+  for insert to authenticated with check (reporter_id = auth.uid());
+
+-- =========================================================
+-- RPC: send_request
+-- =========================================================
+create or replace function send_request(
+  p_event_id uuid, p_receiver_id uuid, p_message text default null
+) returns match_requests
+language plpgsql security definer set search_path = public as $$
+declare
+  v_sender uuid := auth.uid();
+  v_date date;
+  v_req match_requests;
+begin
+  if v_sender is null then raise exception 'Not authenticated'; end if;
+  if v_sender = p_receiver_id then raise exception 'You cannot request yourself'; end if;
+
+  select event_date into v_date from venue_events where id = p_event_id;
+  if v_date is null or v_date < ist_today() then
+    raise exception 'This event is not available';
+  end if;
+
+  if exists (
+    select 1 from blocks
+    where (blocker_id = v_sender and blocked_id = p_receiver_id)
+       or (blocker_id = p_receiver_id and blocked_id = v_sender)
+  ) then raise exception 'Not allowed'; end if;
+
+  if not exists (select 1 from partner_listings
+                 where user_id = v_sender and event_id = p_event_id and status = 'open') then
+    raise exception 'Post your own listing for this event first';
+  end if;
+
+  if not exists (select 1 from partner_listings
+                 where user_id = p_receiver_id and event_id = p_event_id and status = 'open') then
+    raise exception 'This person is no longer available';
+  end if;
+
+  if (select count(*) from match_requests
+      where sender_id = v_sender and event_id = p_event_id and status = 'pending') >= 5 then
+    raise exception 'You can have at most 5 pending requests per event';
+  end if;
+
+  insert into match_requests (event_id, sender_id, receiver_id, message)
+  values (p_event_id, v_sender, p_receiver_id, p_message)
+  returning * into v_req;
+
+  return v_req;
+end; $$;
+
+-- =========================================================
+-- RPC: respond_to_request (receiver accepts or rejects)
+-- =========================================================
+create or replace function respond_to_request(p_request_id uuid, p_accept boolean)
+returns match_requests
+language plpgsql security definer set search_path = public as $$
+declare
+  v_user uuid := auth.uid();
+  v_req match_requests;
+begin
+  if v_user is null then raise exception 'Not authenticated'; end if;
+
+  select * into v_req from match_requests where id = p_request_id for update;
+  if not found then raise exception 'Request not found'; end if;
+  if v_req.receiver_id <> v_user then raise exception 'Only the receiver can respond'; end if;
+  if v_req.status <> 'pending' then raise exception 'Request is no longer pending'; end if;
+
+  if p_accept then
+    -- both people must still be open for this event
+    if (select count(*) from partner_listings
+        where event_id = v_req.event_id
+          and user_id in (v_req.sender_id, v_req.receiver_id)
+          and status = 'open') < 2 then
+      raise exception 'One of you is already matched for this event';
+    end if;
+
+    update match_requests
+       set status = 'accepted', responded_at = now()
+     where id = v_req.id returning * into v_req;
+
+    update partner_listings set status = 'matched'
+     where event_id = v_req.event_id
+       and user_id in (v_req.sender_id, v_req.receiver_id);
+
+    -- auto-cancel every other pending request involving either person for this event
+    update match_requests
+       set status = 'cancelled', responded_at = now()
+     where event_id = v_req.event_id
+       and status = 'pending'
+       and id <> v_req.id
+       and (sender_id in (v_req.sender_id, v_req.receiver_id)
+         or receiver_id in (v_req.sender_id, v_req.receiver_id));
+  else
+    update match_requests
+       set status = 'rejected', responded_at = now()
+     where id = v_req.id returning * into v_req;
+  end if;
+
+  return v_req;
+end; $$;
+
+-- =========================================================
+-- RPC: cancel_request (sender withdraws a pending request)
+-- =========================================================
+create or replace function cancel_request(p_request_id uuid)
+returns match_requests
+language plpgsql security definer set search_path = public as $$
+declare v_req match_requests;
+begin
+  update match_requests
+     set status = 'cancelled', responded_at = now()
+   where id = p_request_id and sender_id = auth.uid() and status = 'pending'
+  returning * into v_req;
+  if not found then raise exception 'Nothing to cancel'; end if;
+  return v_req;
+end; $$;
+
+-- =========================================================
+-- RPC: unmatch (either person undoes an accepted match)
+-- Reopens both listings, closes the request so contacts are hidden again
+-- =========================================================
+create or replace function unmatch(p_request_id uuid)
+returns void
+language plpgsql security definer set search_path = public as $$
+declare v_req match_requests;
+begin
+  select * into v_req from match_requests
+   where id = p_request_id and status = 'accepted'
+     and auth.uid() in (sender_id, receiver_id) for update;
+  if not found then raise exception 'Match not found'; end if;
+
+  update match_requests set status = 'cancelled', responded_at = now() where id = v_req.id;
+  update partner_listings set status = 'open'
+   where event_id = v_req.event_id and user_id in (v_req.sender_id, v_req.receiver_id);
+end; $$;
+
+-- Lock down RPC execution
+revoke all on function send_request(uuid, uuid, text)    from public, anon;
+revoke all on function respond_to_request(uuid, boolean) from public, anon;
+revoke all on function cancel_request(uuid)              from public, anon;
+revoke all on function unmatch(uuid)                     from public, anon;
+grant execute on function send_request(uuid, uuid, text)    to authenticated;
+grant execute on function respond_to_request(uuid, boolean) to authenticated;
+grant execute on function cancel_request(uuid)              to authenticated;
+grant execute on function unmatch(uuid)                     to authenticated;
+
+-- =========================================================
+-- REALTIME (in-app notifications)
+-- =========================================================
+alter publication supabase_realtime add table match_requests;
+```
+
+**Design notes the agent must preserve**
+- `profile_contacts` is a separate table because RLS works on rows, not columns. Never merge phone/Instagram into `profiles`.
+- There is deliberately no insert/update policy on `match_requests`. The client calls the RPCs only.
+- Dates use `ist_today()` because the database runs in UTC.
+
+## 6. Frontend structure (Next.js App Router)
+
+```
+src/
+  middleware.ts                 # refresh Supabase session; redirect logged-out users to /login
+  app/
+    layout.tsx                  # providers (TanStack Query), nav, toasts
+    login/page.tsx
+    auth/callback/route.ts      # exchanges the OAuth code for a session
+    onboarding/page.tsx
+    (app)/                      # route group: requires auth + onboarded
+      layout.tsx                # server-side check: redirect to /onboarding if not onboarded
+      page.tsx                  # map home
+      venue/[venueId]/page.tsx
+      event/[eventId]/page.tsx
+      dashboard/page.tsx
+      profile/page.tsx
+    terms/page.tsx
+    privacy/page.tsx
+  lib/
+    supabase/
+      client.ts                 # browser client (createBrowserClient)
+      server.ts                 # server client (createServerClient with cookies)
+    queries/                    # TanStack Query hooks (venues, events, listings, requests, profile)
+    rpc.ts                      # sendRequest, respondToRequest, cancelRequest, unmatch
+    date.ts                     # todayIST helper
+  components/
+    VenueMap.tsx                # client-only, dynamically imported (ssr: false)
+    ListingCard.tsx
+    RequestCard.tsx
+    ContactReveal.tsx
+    ReportDialog.tsx
+    Toast.tsx / EmptyState.tsx / Spinner.tsx
+```
+
+### Routes
+
+| Route | Guard | Purpose |
+|---|---|---|
+| `/login` | public | Google sign-in button |
+| `/auth/callback` | public | OAuth code exchange, then redirect to `/` |
+| `/onboarding` | auth | Profile + contact form |
+| `/` | auth + onboarded | Map with venue pins |
+| `/venue/[venueId]` | auth + onboarded | Venue details, date picker |
+| `/event/[eventId]` | auth + onboarded | Listings for that event, post own listing |
+| `/dashboard` | auth + onboarded | Received / Sent / Matched |
+| `/profile` | auth + onboarded | Edit profile, blocked list |
+| `/terms`, `/privacy` | public | Static pages |
+
+## 7. Screen specs
+
+**Login**: Single "Continue with Google" button.
+`supabase.auth.signInWithOAuth({ provider: 'google', options: { redirectTo: `${window.location.origin}/auth/callback` } })`.
+
+**Onboarding** (blocks the rest of the app until done):
+- Display name, age (18+), gender, experience, short bio (optional)
+- Contact: phone or Instagram (at least one required). Helper text: "Only shared with someone after you both accept a match."
+- Checkbox: "I confirm I am 18 or older and will meet only in public at the venue."
+- On submit: update `profiles` (set `onboarded = true`), upsert `profile_contacts`.
+
+**Map home**
+- Full-screen Leaflet map (free OpenStreetMap tiles) centered on Hyderabad (about 17.385, 78.4867), zoom 11. The map is only for showing where venues are: one pin per active venue, no routing, search or geolocation.
+- Marker popup: name, area, entry fee, "View" button.
+- Bottom sheet or side list of venues for mobile and accessibility.
+- Show the count of open listings per venue for the next upcoming event (optional, nice to have).
+
+**Venue detail**: Description, address, fee, and a list of upcoming event dates. Selecting a date goes to `/event/:eventId`.
+
+**Event listings**
+- If the user has no listing for this event: show a "Post my listing" form (note, preferred gender). Listing is required before they can send requests.
+- If they have one: show status (open/matched) and an option to close it.
+- Grid of other open listings: avatar, name, age, experience, note. Filters: gender, experience.
+- "Send request" opens a dialog with an optional message, then calls `send_request`.
+- Disable the button if a request to that person already exists for this event.
+- Each card has a "..." menu with Block and Report.
+
+**Dashboard**
+- **Received**: pending first. Accept and Decline buttons (call `respond_to_request`). Shows sender profile, venue, date, message.
+- **Sent**: status badges (pending/accepted/rejected/cancelled). Pending ones have "Cancel".
+- **Matched**: accepted requests only. Shows the other person's profile and **contact details** (phone and/or Instagram, with a "Open WhatsApp" link `https://wa.me/<number>` and an Instagram link), plus the venue and date, and an "Unmatch" button.
+- Unread badge on the nav for new pending received requests, driven by Realtime.
+
+**Profile**: edit all fields, edit contacts, list of blocked users with unblock.
+
+## 8. Data access patterns (Supabase JS)
+
+```ts
+// Venues (client components use the browser client; server components use the server client)
+supabase.from('venues').select('*').eq('is_active', true)
+
+// Upcoming events for a venue (IST-safe: compute today's date client-side in IST or filter via RPC)
+supabase.from('venue_events').select('*').eq('venue_id', id).gte('event_date', todayIST).order('event_date')
+
+// Listings for an event
+supabase.from('partner_listings')
+  .select('*, profile:profiles(id, display_name, avatar_url, age, gender, experience, bio)')
+  .eq('event_id', eventId).eq('status', 'open').neq('user_id', me)
+
+// Received requests
+supabase.from('match_requests')
+  .select('*, sender:profiles!sender_id(*), event:venue_events(*, venue:venues(*))')
+  .eq('receiver_id', me).order('created_at', { ascending: false })
+
+// Sent requests: same with receiver:profiles!receiver_id(*) and .eq('sender_id', me)
+
+// Contacts of a matched user (RLS returns a row only if an accepted request exists)
+supabase.from('profile_contacts').select('*').eq('user_id', otherUserId).maybeSingle()
+
+// Mutations
+supabase.rpc('send_request', { p_event_id, p_receiver_id, p_message })
+supabase.rpc('respond_to_request', { p_request_id, p_accept: true })
+supabase.rpc('cancel_request', { p_request_id })
+supabase.rpc('unmatch', { p_request_id })
+```
+
+Realtime: subscribe to `postgres_changes` on `match_requests` filtered by `receiver_id=eq.<me>` (new requests) and `sender_id=eq.<me>` (accept/reject updates). On any event, invalidate the relevant TanStack Query keys and show a toast.
+
+## 9. Business rules (checklist)
+
+1. A user can have one listing per event.
+2. A user must have an open listing to send requests for that event.
+3. Maximum 5 pending sent requests per user per event.
+4. Cannot request yourself, a blocked user, or someone who blocked you.
+5. Only the receiver can accept or reject. Only the sender can cancel.
+6. On accept: both listings become `matched`, and all other pending requests involving either person for that event are auto-cancelled.
+7. Contact details are visible only while an `accepted` request exists between the two users.
+8. Unmatching reopens both listings and hides contacts again.
+9. Past events: hide them in the UI; `send_request` rejects requests for events before today (IST).
+10. Duplicate requests for the same event and pair are impossible (unique constraint). Show a friendly message.
+
+## 10. Safety and privacy
+
+- 18+ enforced by DB check and an onboarding confirmation.
+- Show a persistent tip on event and match screens: "Meet at the venue, in a public place. Don't share personal details until you're comfortable."
+- Block and report on every profile card. Reports only insert into `reports`. The owner reviews them in the Supabase dashboard.
+- Add a simple Terms and Privacy page (can be static text): what data is collected, that contact details are shared only after mutual acceptance, and how to delete the account.
+- Account deletion: a "Delete my account" button on Profile that calls a Supabase Edge Function (service role) to delete the `auth.users` row; cascades remove everything else.
+- Never log or expose phone/Instagram in analytics or error messages.
+- Sanitize all user text on render (React escapes by default; never use `dangerouslySetInnerHTML`).
+
+## 11. Build phases with acceptance checks
+
+**Phase 1: Foundations**
+- Next.js (App Router) + TS + Tailwind + TanStack Query scaffold. Supabase browser and server clients, middleware. Run the migration.
+- Accept: signing in with Google creates a row in `profiles` automatically.
+
+**Phase 2: Auth + onboarding**
+- Login, OAuth callback route, middleware auth redirect, onboarding gate, Onboarding page.
+- Accept: a new user is forced through onboarding; a returning user lands on the map; logged-out users cannot reach any page.
+
+**Phase 3: Map + venues**
+- VenueMap with pins (dynamic import, no SSR), VenueDetail, event dates.
+- Accept: every active venue in the `venues` table appears as a pin; tapping one reaches the correct detail page; works at 375px width.
+
+**Phase 4: Listings + requests**
+- Post/close listing, browse listings, filters, send request via RPC, error toasts for RPC exceptions.
+- Accept: with two test accounts, A can send a request to B; sending a 6th pending request fails with the friendly message; duplicates are blocked.
+
+**Phase 5: Dashboard + match + contact reveal**
+- Received/Sent/Matched tabs, accept/reject/cancel/unmatch, ContactReveal.
+- Accept: before acceptance, querying B's `profile_contacts` as A returns no rows; after acceptance, both see each other's contacts; after unmatch, contacts disappear again; accepting one request auto-cancels the others.
+
+**Phase 6: Safety, realtime, polish**
+- Block/report, Realtime badge and toasts, empty/loading/error states, profile editing, delete account, Terms/Privacy.
+- Accept: a blocked user's listing disappears from the blocker's browse list; the received badge updates live without refresh.
+
+## 12. Security test script (must pass before launch)
+
+Using two accounts A and B plus the browser console or a SQL client with each user's JWT:
+1. A cannot `select` B's `profile_contacts` with no accepted request.
+2. A cannot directly `insert`, `update` or `delete` rows in `match_requests` (RLS denies).
+3. A cannot call `respond_to_request` on a request where A is the sender.
+4. A cannot accept a request that is already rejected/cancelled.
+5. A cannot read another user's non-open listing.
+6. An anonymous (logged-out) client cannot read any table or call any RPC.
+7. A cannot update B's profile.
+
+## 13. UI and quality requirements
+
+- Mobile-first, works well at 375px; touch targets at least 44px.
+- Festive theme (warm orange, deep red, gold accents), but keep text contrast accessible.
+- Every list has loading, empty and error states.
+- Show RPC error messages to the user as readable toasts (the messages in the SQL are written for that).
+- No client-side-only enforcement of any rule in Section 9.
+
+## 14. Out of scope for v1 (future)
+
+- Group matching (parties of 4 to 6)
+- In-app chat
+- Email/push notifications (Resend or Supabase Edge Functions)
+- Venue admin panel and venue self-listing
+- Ratings after the event
+- Multi-city support (add `city` to `venues`)
+
+## 15. Deliverables expected from the agent
+
+1. Working Next.js repo with the structure in Section 6.
+2. `supabase/migrations/001_init.sql` (Section 5). No seed file.
+3. `.env.example`.
+4. `README.md` covering local setup and Supabase and Google OAuth setup (no deployment steps).
+5. Short test notes confirming each check in Sections 11 and 12.
