@@ -23,7 +23,7 @@ export default function MapHomePage() {
       </div>
       <aside className="max-h-[52%] overflow-y-auto border-t border-line bg-cream md:max-h-none md:w-80 md:border-t-0 md:border-l">
         <div className="sticky top-0 bg-cream px-4 py-3">
-          <h1 className="font-display text-xl text-red">Venues in Hyderabad</h1>
+          <h1 className="font-display text-xl text-red">Venues in Kamareddy</h1>
           <p className="text-xs text-muted">{list.length} active venues</p>
         </div>
         {list.length === 0 ? (

@@ -15,12 +15,12 @@ const pinIcon = L.divIcon({
   popupAnchor: [0, -20],
 });
 
-const HYDERABAD: [number, number] = [17.385, 78.4867];
+const KAMAREDDY: [number, number] = [18.32, 78.34];
 
 export default function VenueMap({ venues }: { venues: VenueWithStats[] }) {
   return (
     <MapContainer
-      center={HYDERABAD}
+      center={KAMAREDDY}
       zoom={11}
       scrollWheelZoom
       className="h-full w-full"

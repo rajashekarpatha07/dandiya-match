@@ -15,9 +15,9 @@ const fraunces = Fraunces({
 });
 
 export const metadata: Metadata = {
-  title: "Dandiya Match · Hyderabad",
+  title: "Dandiya Match · Kamareddy",
   description:
-    "Find a dandiya or garba partner at a venue in Hyderabad for a specific night.",
+    "Find a dandiya or garba partner at a venue in Kamareddy for a specific night.",
 };
 
 export default function RootLayout({

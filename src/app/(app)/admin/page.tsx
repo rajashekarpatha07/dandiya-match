@@ -260,6 +260,54 @@ function VenueForm({
     start_time: "",
     end_time: "",
   });
+  const [isGeocoding, setIsGeocoding] = useState(false);
+
+  // Geocode address to get lat/lng
+  const handleGeocodeAddress = async () => {
+    const addressQuery = [formData.name, formData.address, formData.area, "Kamareddy, Telangana, India"]
+      .filter(Boolean)
+      .join(", ");
+
+    if (!addressQuery.trim()) {
+      onError("Please enter at least a venue name or address to geocode");
+      return;
+    }
+
+    setIsGeocoding(true);
+    try {
+      // Use Nominatim (OpenStreetMap) geocoding service - free, no API key needed
+      const response = await fetch(
+        `https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(addressQuery)}&limit=1`,
+        {
+          headers: {
+            "User-Agent": "DandiyaMatch/1.0", // Required by Nominatim
+          },
+        }
+      );
+
+      if (!response.ok) {
+        throw new Error("Geocoding service unavailable");
+      }
+
+      const data = await response.json();
+
+      if (data && data.length > 0) {
+        const { lat, lon } = data[0];
+        setFormData({
+          ...formData,
+          lat: parseFloat(lat).toFixed(6),
+          lng: parseFloat(lon).toFixed(6),
+        });
+        onSuccess(`Location found: ${parseFloat(lat).toFixed(4)}, ${parseFloat(lon).toFixed(4)}`);
+      } else {
+        onError("Location not found. Please enter coordinates manually or try a more specific address.");
+      }
+    } catch (error) {
+      onError(error instanceof Error ? error.message : "Failed to geocode address");
+    } finally {
+      setIsGeocoding(false);
+    }
+  };
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -354,7 +402,29 @@ function VenueForm({
             value={formData.address}
             onChange={(e) => setFormData({ ...formData, address: e.target.value })}
             className="mt-1 w-full rounded-xl border border-line bg-background px-4 py-2 text-sm focus:border-orange focus:outline-none"
+            placeholder="Full address for geocoding"
           />
+        </div>
+
+        <div className="rounded-xl border-2 border-orange/30 bg-orange/5 p-4">
+          <div className="flex items-start gap-2 mb-3">
+            <span className="text-xl">📍</span>
+            <div className="flex-1">
+              <p className="text-sm font-semibold text-orange">Auto-fill Location</p>
+              <p className="text-xs text-muted mt-1">
+                Click the button below to automatically get coordinates from the address above
+              </p>
+            </div>
+          </div>
+          <Button
+            type="button"
+            onClick={handleGeocodeAddress}
+            disabled={isGeocoding}
+            variant="secondary"
+            className="w-full"
+          >
+            {isGeocoding ? "Finding location..." : "📍 Get Coordinates from Address"}
+          </Button>
         </div>
 
         <div className="grid grid-cols-2 gap-4">
@@ -367,6 +437,7 @@ function VenueForm({
               value={formData.lat}
               onChange={(e) => setFormData({ ...formData, lat: e.target.value })}
               className="mt-1 w-full rounded-xl border border-line bg-background px-4 py-2 text-sm focus:border-orange focus:outline-none"
+              placeholder="Auto-filled"
             />
           </div>
           <div>
@@ -378,6 +449,7 @@ function VenueForm({
               value={formData.lng}
               onChange={(e) => setFormData({ ...formData, lng: e.target.value })}
               className="mt-1 w-full rounded-xl border border-line bg-background px-4 py-2 text-sm focus:border-orange focus:outline-none"
+              placeholder="Auto-filled"
             />
           </div>
         </div>

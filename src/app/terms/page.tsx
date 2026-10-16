@@ -142,7 +142,7 @@ export default function TermsPage() {
         <section>
           <h2 className="text-lg font-semibold text-red">11. Governing Law</h2>
           <p>
-            These terms are governed by the laws of India. Any disputes shall be subject to the jurisdiction of courts in Hyderabad, Telangana.
+            These terms are governed by the laws of India. Any disputes shall be subject to the jurisdiction of courts in Kamareddy, Telangana.
           </p>
         </section>
 

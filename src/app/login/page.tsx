@@ -28,7 +28,7 @@ export default function LoginPage() {
   return (
     <main className="mx-auto flex min-h-dvh w-full max-w-md flex-col justify-center px-5 py-10">
       <p className="text-sm font-semibold tracking-widest text-orange uppercase">
-        Hyderabad
+        Kamareddy
       </p>
       <h1 className="font-display mt-2 text-4xl text-red">Dandiya Match</h1>
       <p className="mt-3 text-muted">
