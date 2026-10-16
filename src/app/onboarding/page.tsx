@@ -1,6 +1,7 @@
 "use client";
 
 import { zodResolver } from "@hookform/resolvers/zod";
+import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useEffect } from "react";
 import { useForm } from "react-hook-form";
@@ -123,8 +124,22 @@ export default function OnboardingPage() {
           Sign out
         </button>
       </div>
-      <p className="mt-2 text-sm text-muted">
-        Only shared with someone after you both accept a match.
+      
+      {/* Privacy Notice */}
+      <div className="mt-4 rounded-2xl border-2 border-orange bg-orange/5 p-4">
+        <div className="flex items-start gap-3">
+          <span className="text-2xl">🔒</span>
+          <div>
+            <h2 className="font-semibold text-orange">Your Privacy is Protected</h2>
+            <p className="mt-1 text-sm text-ink">
+              Your phone number and Instagram are <strong>completely private</strong> until you and another person <strong>both accept</strong> a match. No one can see these details before that.
+            </p>
+          </div>
+        </div>
+      </div>
+      
+      <p className="mt-4 text-sm text-muted">
+        Fill in your details below. Your contact information stays hidden until mutual match acceptance.
       </p>
       <form className="mt-6 space-y-4" onSubmit={handleSubmit(onSubmit)}>
         <Field label="Display name" error={errors.display_name?.message}>
@@ -158,17 +173,27 @@ export default function OnboardingPage() {
         </Field>
         <Field label="Phone" error={errors.phone?.message}>
           <input className={inputClass} {...register("phone")} placeholder="10-digit mobile" />
+          <p className="mt-1 text-xs text-muted">🔒 Only visible after mutual match acceptance</p>
         </Field>
         <Field label="Instagram" error={errors.instagram?.message}>
           <input className={inputClass} {...register("instagram")} placeholder="@handle" />
+          <p className="mt-1 text-xs text-muted">🔒 Only visible after mutual match acceptance</p>
         </Field>
-        <label className="flex min-h-11 items-start gap-3 text-sm">
-          <input type="checkbox" className="mt-1 h-5 w-5" {...register("confirm18")} />
-          <span>
-            I confirm I am 18 or older and will meet only in public at the
-            venue.
-          </span>
-        </label>
+        
+        <div className="rounded-xl border border-line bg-card p-4">
+          <label className="flex items-start gap-3 text-sm">
+            <input type="checkbox" className="mt-1 h-5 w-5" {...register("confirm18")} />
+            <span>
+              I confirm that:
+              <ul className="mt-2 space-y-1 text-xs text-muted">
+                <li>• I am 18 years or older</li>
+                <li>• I will meet only in public at the venue</li>
+                <li>• I understand my contact details are private until mutual match</li>
+                <li>• I agree to the <Link href="/terms" className="text-orange underline">Terms of Use</Link> and <Link href="/privacy" className="text-orange underline">Privacy Policy</Link></li>
+              </ul>
+            </span>
+          </label>
+        </div>
         {errors.confirm18 ? (
           <p className="text-sm text-red">{errors.confirm18.message}</p>
         ) : null}
